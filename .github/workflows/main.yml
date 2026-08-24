@@ -22,6 +22,8 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
 
       - name: Find ZIP file
         id: zip
@@ -30,15 +32,13 @@ jobs:
           echo "Searching for ZIP file..."
 
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
-            -maxdepth 2 \
+            -maxdepth 3 \
             -type f \
             -iname "*.zip" \
             -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: No ZIP file found."
-            echo "Repository contents:"
-            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f | head -200
             exit 1
           fi
 
@@ -58,31 +58,65 @@ jobs:
 
           echo "ZIP extracted successfully."
 
-          echo "Extracted files:"
-          find extracted_project -maxdepth 4 -type f | head -200
+          echo "Top-level extracted contents:"
+          find extracted_project -maxdepth 3 -type f | head -200
 
       - name: Find Android project
         id: project
         shell: bash
         run: |
-          echo "Searching for Gradle Android project..."
+          echo "Searching for Android project..."
 
+          PROJECT_DIR=""
+
+          # First try Gradle wrapper
           GRADLEW=$(find extracted_project \
             -type f \
             -name "gradlew" \
             -print -quit)
 
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew was not found inside the ZIP."
-            echo "Project contents:"
-            find extracted_project -maxdepth 6 -type f | head -300
-            exit 1
+          if [ -n "$GRADLEW" ]; then
+            PROJECT_DIR=$(dirname "$GRADLEW")
+            echo "Found Gradle wrapper:"
+            echo "$GRADLEW"
           fi
 
-          PROJECT_DIR=$(dirname "$GRADLEW")
+          # If gradlew is missing, search for settings.gradle
+          if [ -z "$PROJECT_DIR" ]; then
+            SETTINGS_FILE=$(find extracted_project \
+              -type f \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+              -print -quit)
 
-          echo "Gradle wrapper found:"
-          echo "$GRADLEW"
+            if [ -n "$SETTINGS_FILE" ]; then
+              PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+              echo "Found Android project using settings file:"
+              echo "$SETTINGS_FILE"
+            fi
+          fi
+
+          # If still not found, search for build.gradle
+          if [ -z "$PROJECT_DIR" ]; then
+            BUILD_FILE=$(find extracted_project \
+              -type f \
+              \( -name "build.gradle" -o -name "build.gradle.kts" \) \
+              -print -quit)
+
+            if [ -n "$BUILD_FILE" ]; then
+              PROJECT_DIR=$(dirname "$BUILD_FILE")
+              echo "Found Gradle project using build file:"
+              echo "$BUILD_FILE"
+            fi
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android/Gradle project was not found."
+
+            echo "All extracted files:"
+            find extracted_project -maxdepth 8 -type f | head -500
+
+            exit 1
+          fi
 
           echo "Android project directory:"
           echo "$PROJECT_DIR"
@@ -96,13 +130,33 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          chmod +x gradlew
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            echo "Using Gradle wrapper."
+            ./gradlew --version
+          else
+            echo "No gradlew found."
+            echo "Using installed Gradle."
+            gradle --version
+          fi
 
-          echo "Java version:"
-          java -version
+      - name: Check Android project
+        shell: bash
+        run: |
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
 
-          echo "Gradle version:"
-          ./gradlew --version
+          cd "$PROJECT_DIR"
+
+          echo "Project files:"
+          ls -la
+
+          echo "Gradle files:"
+          find . -maxdepth 3 -type f \
+            \( -name "settings.gradle" \
+            -o -name "settings.gradle.kts" \
+            -o -name "build.gradle" \
+            -o -name "build.gradle.kts" \) \
+            -print
 
       - name: Build Debug APK
         shell: bash
@@ -113,9 +167,15 @@ jobs:
 
           echo "Starting Android build..."
 
-          ./gradlew clean assembleDebug \
-            --no-daemon \
-            --stacktrace
+          if [ -f "gradlew" ]; then
+            ./gradlew clean assembleDebug \
+              --no-daemon \
+              --stacktrace
+          else
+            gradle clean assembleDebug \
+              --no-daemon \
+              --stacktrace
+          fi
 
       - name: Find APK
         id: apk
@@ -125,23 +185,24 @@ jobs:
 
           echo "Searching for generated APK..."
 
-          find "$PROJECT_DIR" \
+          APK=$(find "$PROJECT_DIR" \
             -type f \
-            -name "*.apk" \
-            -print
-
-          APK=$(find "$PROJECT_DIR/app/build/outputs" \
-            -type f \
-            -name "*.apk" \
+            -path "*/build/outputs/apk/*.apk" \
             -print -quit)
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK was not generated."
 
-            echo "Build outputs:"
+            echo "Searching all APK files:"
             find "$PROJECT_DIR" \
-              -path "*/build/outputs/*" \
               -type f \
+              -name "*.apk" \
+              -print
+
+            echo "Build output directories:"
+            find "$PROJECT_DIR" \
+              -type d \
+              -path "*/build/outputs*" \
               -print
 
             exit 1
@@ -155,12 +216,13 @@ jobs:
       - name: Prepare APK artifact
         shell: bash
         run: |
+          rm -rf artifacts
           mkdir -p artifacts
 
           cp "${{ steps.apk.outputs.apk_path }}" \
             "artifacts/Maktab-Islami-4.9-debug.apk"
 
-          echo "Final APK:"
+          echo "Prepared APK:"
           ls -lh artifacts/
 
       - name: Upload APK
