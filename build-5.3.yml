@@ -1,0 +1,210 @@
+name: Build Maktab Islami 5.3
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build APK 5.3
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Find Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GRADLEW=$(find . -type f -name "gradlew" \
+            ! -path "./.git/*" \
+            -print -quit)
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$GRADLEW")
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare offline data
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.project.outputs.project_dir }}"
+          DATA="$PROJECT/app/src/main/assets/data"
+
+          mkdir -p "$DATA/books"
+          mkdir -p "$DATA/quran"
+
+      - name: Download Quran and 9 Hadith collections
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.project.outputs.project_dir }}"
+          DATA="$PROJECT/app/src/main/assets/data"
+          BOOKS="$DATA/books"
+
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+
+          download_json() {
+            local URL="$1"
+            local OUT="$2"
+
+            echo "Downloading: $URL"
+
+            curl \
+              --fail \
+              --show-error \
+              --location \
+              --retry 5 \
+              --retry-delay 3 \
+              --connect-timeout 30 \
+              --max-time 600 \
+              -H "Accept: application/json" \
+              "$URL" \
+              -o "$OUT"
+
+            test -s "$OUT"
+            jq empty "$OUT" >/dev/null
+
+            echo "OK: $OUT"
+          }
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/quran/ar" \
+            "$DATA/quran/quran-ar.json"
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/bukhari/ar" \
+            "$BOOKS/sahih-al-bukhari.json"
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/muslim/ar" \
+            "$BOOKS/sahih-muslim.json"
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/abudawud/ar" \
+            "$BOOKS/sunan-abi-dawud.json"
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/tirmidhi/ar" \
+            "$BOOKS/jami-at-tirmidhi.json"
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/nasai/ar" \
+            "$BOOKS/sunan-an-nasai.json"
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/ibnmajah/ar" \
+            "$BOOKS/sunan-ibn-majah.json"
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/malik/ar" \
+            "$BOOKS/muwatta-malik.json"
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/nawawi/ar" \
+            "$BOOKS/forty-nawawi.json"
+
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/qudsi/ar" \
+            "$BOOKS/forty-qudsi.json"
+
+      - name: Verify data
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.project.outputs.project_dir }}"
+          DATA="$PROJECT/app/src/main/assets/data"
+
+          REQUIRED=(
+            "$DATA/quran/quran-ar.json"
+            "$DATA/books/sahih-al-bukhari.json"
+            "$DATA/books/sahih-muslim.json"
+            "$DATA/books/sunan-abi-dawud.json"
+            "$DATA/books/jami-at-tirmidhi.json"
+            "$DATA/books/sunan-an-nasai.json"
+            "$DATA/books/sunan-ibn-majah.json"
+            "$DATA/books/muwatta-malik.json"
+            "$DATA/books/forty-nawawi.json"
+            "$DATA/books/forty-qudsi.json"
+          )
+
+          for FILE in "${REQUIRED[@]}"; do
+            if [ ! -s "$FILE" ]; then
+              echo "ERROR: Missing or empty: $FILE"
+              exit 1
+            fi
+
+            jq empty "$FILE" >/dev/null
+            echo "OK: $FILE"
+          done
+
+          echo "===== OFFLINE DATA SIZE ====="
+          du -sh "$DATA"
+
+      - name: Make Gradle executable
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew clean assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      - name: Find APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.project.outputs.project_dir }}"
+
+          APK=$(find "$PROJECT/app/build/outputs/apk" \
+            -type f \
+            -name "*.apk" \
+            -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not created."
+            exit 1
+          fi
+
+          mkdir -p artifacts
+          cp "$APK" artifacts/Maktab-Islami-5.3-debug.apk
+
+          ls -lh artifacts/Maktab-Islami-5.3-debug.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maktab-Islami-5.3-APK
+          path: artifacts/Maktab-Islami-5.3-debug.apk
+          if-no-files-found: error
+          retention-days: 30
