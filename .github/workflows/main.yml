@@ -1,8 +1,11 @@
+main.yml — Build Maktab Islami 4.9
+
 name: Build Maktab Islami 4.9
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -19,19 +22,27 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Find ZIP file
         id: zip
         shell: bash
         run: |
-          ZIP_FILE=$(find . -type f -iname '*.zip' -print -quit)
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
+            -maxdepth 1 \
+            -type f \
+            -iname "*.zip" \
+            -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: No ZIP file found."
-            find . -maxdepth 4 -type f -print
             exit 1
           fi
 
-          echo "ZIP_FILE=$ZIP_FILE"
+          echo "ZIP found:"
+          echo "$ZIP_FILE"
+
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Extract project ZIP
@@ -40,59 +51,86 @@ jobs:
           rm -rf extracted_project
           mkdir -p extracted_project
 
-          unzip -q "${{ steps.zip.outputs.zip_file }}" -d extracted_project
+          unzip -q "${{ steps.zip.outputs.zip_file }}" \
+            -d extracted_project
 
           echo "ZIP extracted successfully."
-
-          find extracted_project -maxdepth 6 -type f -name 'gradlew' -print
 
       - name: Find Android project
         id: project
         shell: bash
         run: |
+          echo "Searching for Android project..."
+
           GRADLEW=$(find extracted_project \
             -type f \
-            -name 'gradlew' \
+            -name "gradlew" \
             -print -quit)
 
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew was not found inside the ZIP."
-            echo "Project contents:"
-            find extracted_project -maxdepth 6 -type f -print | head -300
-            exit 1
+          if [ -n "$GRADLEW" ]; then
+            PROJECT_DIR=$(dirname "$GRADLEW")
+            USE_WRAPPER=true
+          else
+            BUILD_FILE=$(find extracted_project \
+              -type f \
+              \( -name "settings.gradle" \
+              -o -name "settings.gradle.kts" \
+              -o -name "build.gradle" \
+              -o -name "build.gradle.kts" \) \
+              -print -quit)
+
+            if [ -z "$BUILD_FILE" ]; then
+              echo "ERROR: Android/Gradle project was not found."
+              echo "Extracted files:"
+              find extracted_project \
+                -maxdepth 6 \
+                -type f \
+                -print | head -300
+              exit 1
+            fi
+
+            PROJECT_DIR=$(dirname "$BUILD_FILE")
+            USE_WRAPPER=false
           fi
 
-          PROJECT_DIR=$(dirname "$GRADLEW")
-
-          echo "Gradle wrapper:"
-          echo "$GRADLEW"
-
-          echo "Android project:"
-          echo "$PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "USE_WRAPPER=$USE_WRAPPER"
 
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "use_wrapper=$USE_WRAPPER" >> "$GITHUB_OUTPUT"
 
       - name: Build APK
-        working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
-          chmod +x gradlew
+          cd "${{ steps.project.outputs.project_dir }}"
 
-          ./gradlew clean assembleDebug \
-            --no-daemon \
-            --stacktrace
+          if [ "${{ steps.project.outputs.use_wrapper }}" = "true" ]; then
+            chmod +x gradlew
+            ./gradlew clean assembleDebug --no-daemon --stacktrace
+          else
+            gradle clean assembleDebug --no-daemon --stacktrace
+          fi
 
       - name: Find APK
         shell: bash
         run: |
+          echo "Searching for APK..."
+
           APK=$(find \
-            "${{ steps.project.outputs.project_dir }}/app/build/outputs/apk" \
+            "${{ steps.project.outputs.project_dir }}" \
             -type f \
-            -name '*.apk' \
+            -path "*/build/outputs/apk/*.apk" \
             -print -quit)
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK was not created."
+
+            echo "Searching all APK files:"
+            find "${{ steps.project.outputs.project_dir }}" \
+              -type f \
+              -name "*.apk" \
+              -print
+
             exit 1
           fi
 
@@ -110,3 +148,4 @@ jobs:
           name: Maktab-Islami-4.9-APK
           path: artifacts/Maktab-Islami-4.9-debug.apk
           if-no-files-found: error
+          retention-days: 30
