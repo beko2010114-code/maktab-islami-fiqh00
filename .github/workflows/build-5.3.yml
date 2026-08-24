@@ -1,3 +1,5 @@
+build-5.3.yml
+
 name: Build Maktab Islami 5.3
 
 on:
@@ -15,160 +17,164 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # 1. تحميل المستودع
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. تجهيز Java
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
 
-      - name: Find Android project
+      # 3. تثبيت أدوات فك الضغط
+      - name: Install unzip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip findutils
+
+      # 4. البحث عن ملف المشروع ZIP
+      - name: Find project ZIP
+        id: zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Searching for project ZIP..."
+
+          ZIP_FILE=$(find . -maxdepth 3 -type f \
+            \( -iname "*.zip" \) \
+            ! -path "./.git/*" \
+            -print -quit)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP project file was found."
+            echo "Files in repository:"
+            find . -maxdepth 3 -type f -print
+            exit 1
+          fi
+
+          echo "ZIP found:"
+          echo "$ZIP_FILE"
+
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      # 5. فك المشروع
+      - name: Extract Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="${{ steps.zip.outputs.zip_file }}"
+
+          rm -rf extracted
+          mkdir -p extracted
+
+          echo "Extracting:"
+          echo "$ZIP_FILE"
+
+          unzip -q "$ZIP_FILE" -d extracted
+
+          echo "Extraction completed."
+
+          echo "Extracted files:"
+          find extracted -maxdepth 4 -type f | head -200
+
+      # 6. البحث عن Gradle Wrapper داخل المشروع
+      - name: Find Gradle project
         id: project
         shell: bash
         run: |
           set -euo pipefail
 
-          GRADLEW=$(find . -type f -name "gradlew" \
-            ! -path "./.git/*" \
+          echo "Searching for gradlew..."
+
+          GRADLEW=$(find extracted \
+            -type f \
+            -name "gradlew" \
+            ! -path "*/.git/*" \
             -print -quit)
 
           if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew not found."
+            echo "ERROR: gradlew was not found."
+
+            echo ""
+            echo "Directories:"
+            find extracted -maxdepth 5 -type d -print
+
+            echo ""
+            echo "Gradle-related files:"
+            find extracted -type f \
+              \( -name "*.gradle" \
+              -o -name "*.gradle.kts" \
+              -o -name "settings.gradle" \
+              -o -name "settings.gradle.kts" \
+              -o -name "gradle-wrapper.properties" \) \
+              -print
+
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$GRADLEW")
 
+          echo "Gradle wrapper:"
+          echo "$GRADLEW"
+
+          echo "Android project:"
+          echo "$PROJECT_DIR"
+
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare offline data
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PROJECT="${{ steps.project.outputs.project_dir }}"
-          DATA="$PROJECT/app/src/main/assets/data"
-
-          mkdir -p "$DATA/books"
-          mkdir -p "$DATA/quran"
-
-      - name: Download Quran and 9 Hadith collections
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PROJECT="${{ steps.project.outputs.project_dir }}"
-          DATA="$PROJECT/app/src/main/assets/data"
-          BOOKS="$DATA/books"
-
-          sudo apt-get update
-          sudo apt-get install -y curl jq
-
-          download_json() {
-            local URL="$1"
-            local OUT="$2"
-
-            echo "Downloading: $URL"
-
-            curl \
-              --fail \
-              --show-error \
-              --location \
-              --retry 5 \
-              --retry-delay 3 \
-              --connect-timeout 30 \
-              --max-time 600 \
-              -H "Accept: application/json" \
-              "$URL" \
-              -o "$OUT"
-
-            test -s "$OUT"
-            jq empty "$OUT" >/dev/null
-
-            echo "OK: $OUT"
-          }
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/quran/ar" \
-            "$DATA/quran/quran-ar.json"
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/hadith/bukhari/ar" \
-            "$BOOKS/sahih-al-bukhari.json"
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/hadith/muslim/ar" \
-            "$BOOKS/sahih-muslim.json"
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/hadith/abudawud/ar" \
-            "$BOOKS/sunan-abi-dawud.json"
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/hadith/tirmidhi/ar" \
-            "$BOOKS/jami-at-tirmidhi.json"
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/hadith/nasai/ar" \
-            "$BOOKS/sunan-an-nasai.json"
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/hadith/ibnmajah/ar" \
-            "$BOOKS/sunan-ibn-majah.json"
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/hadith/malik/ar" \
-            "$BOOKS/muwatta-malik.json"
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/hadith/nawawi/ar" \
-            "$BOOKS/forty-nawawi.json"
-
-          download_json \
-            "https://i-muslim.com/api/v1/translations/hadith/qudsi/ar" \
-            "$BOOKS/forty-qudsi.json"
-
-      - name: Verify data
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PROJECT="${{ steps.project.outputs.project_dir }}"
-          DATA="$PROJECT/app/src/main/assets/data"
-
-          REQUIRED=(
-            "$DATA/quran/quran-ar.json"
-            "$DATA/books/sahih-al-bukhari.json"
-            "$DATA/books/sahih-muslim.json"
-            "$DATA/books/sunan-abi-dawud.json"
-            "$DATA/books/jami-at-tirmidhi.json"
-            "$DATA/books/sunan-an-nasai.json"
-            "$DATA/books/sunan-ibn-majah.json"
-            "$DATA/books/muwatta-malik.json"
-            "$DATA/books/forty-nawawi.json"
-            "$DATA/books/forty-qudsi.json"
-          )
-
-          for FILE in "${REQUIRED[@]}"; do
-            if [ ! -s "$FILE" ]; then
-              echo "ERROR: Missing or empty: $FILE"
-              exit 1
-            fi
-
-            jq empty "$FILE" >/dev/null
-            echo "OK: $FILE"
-          done
-
-          echo "===== OFFLINE DATA SIZE ====="
-          du -sh "$DATA"
-
+      # 7. إعطاء صلاحية التنفيذ
       - name: Make Gradle executable
         working-directory: ${{ steps.project.outputs.project_dir }}
-        run: chmod +x gradlew
+        run: |
+          chmod +x gradlew
 
+      # 8. عرض ملفات المشروع قبل البناء
+      - name: Inspect Android project
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          echo "Project directory:"
+          pwd
+
+          echo ""
+          echo "Project files:"
+          find . -maxdepth 3 -type f | sort | head -300
+
+      # 9. تجهيز البيانات الموجودة داخل المشروع
+      - name: Prepare offline data
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/src/main/assets/data
+          mkdir -p app/src/main/assets/data/books
+          mkdir -p app/src/main/assets/data/quran
+
+          echo "Offline data directories prepared."
+
+      # 10. فحص البيانات الموجودة بالفعل
+      - name: Check bundled content
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          echo "Checking bundled content..."
+
+          if [ -d "app/src/main/assets" ]; then
+            find app/src/main/assets \
+              -type f \
+              -print | sort | head -300
+          else
+            echo "No assets directory found yet."
+          fi
+
+      # 11. بناء APK
       - name: Build Debug APK
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
@@ -179,7 +185,9 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      - name: Find APK
+      # 12. البحث عن APK الناتج
+      - name: Find generated APK
+        id: apk
         shell: bash
         run: |
           set -euo pipefail
@@ -192,15 +200,30 @@ jobs:
             -print -quit)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK was not created."
+            echo "ERROR: APK was not generated."
+
+            echo ""
+            echo "Build output:"
+            find "$PROJECT/app/build/outputs" \
+              -type f \
+              -print 2>/dev/null || true
+
             exit 1
           fi
 
+          echo "APK found:"
+          echo "$APK"
+
           mkdir -p artifacts
-          cp "$APK" artifacts/Maktab-Islami-5.3-debug.apk
+
+          cp "$APK" \
+            artifacts/Maktab-Islami-5.3-debug.apk
+
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
           ls -lh artifacts/Maktab-Islami-5.3-debug.apk
 
+      # 13. رفع APK كـArtifact
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
