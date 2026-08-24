@@ -1,0 +1,380 @@
+name: Prepare Maktab Islami 5.3 Full
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Download and Package 5.3 Content
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # --------------------------------------------------
+      # 1. Checkout
+      # --------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------
+      # 2. Install tools
+      # --------------------------------------------------
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq unzip zip
+
+      # --------------------------------------------------
+      # 3. Locate 5.3 ZIP
+      # --------------------------------------------------
+      - name: Locate 5.3 ZIP
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE=$(find . -type f -iname "*.zip" \
+            ! -path "./.git/*" \
+            | head -1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file containing 5.3 was found."
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "$ZIP_FILE"
+
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------
+      # 4. Extract 5.3
+      # --------------------------------------------------
+      - name: Extract 5.3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf work
+          mkdir -p work
+
+          unzip -q "${{ steps.locate.outputs.zip_file }}" -d work
+
+          echo "===== Extracted files ====="
+          find work -type f | sort
+
+      # --------------------------------------------------
+      # 5. Locate content root
+      # --------------------------------------------------
+      - name: Locate content root
+        id: root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          QURAN=$(find work -type f -name "quran.json" -print -quit)
+
+          if [ -n "$QURAN" ]; then
+            ROOT=$(dirname "$(dirname "$(dirname "$QURAN")")")
+          else
+            ROOT=$(find work -maxdepth 2 -type d \
+              -iname "*Maktab*" -print -quit || true)
+          fi
+
+          if [ -z "$ROOT" ]; then
+            ROOT="work/Maktab-Islami-5.3"
+            mkdir -p "$ROOT"
+          fi
+
+          mkdir -p "$ROOT/assets/data/books"
+          mkdir -p "$ROOT/assets/data/quran"
+
+          echo "CONTENT_ROOT=$ROOT"
+          echo "content_root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------
+      # 6. Download function
+      # --------------------------------------------------
+      - name: Download Islamic datasets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.root.outputs.content_root }}"
+          BOOKS="$ROOT/assets/data/books"
+
+          mkdir -p "$BOOKS"
+
+          download_json() {
+            local URL="$1"
+            local OUT="$2"
+
+            echo
+            echo "=========================================="
+            echo "Downloading:"
+            echo "$URL"
+            echo "=========================================="
+
+            curl \
+              --fail \
+              --show-error \
+              --location \
+              --retry 5 \
+              --retry-delay 3 \
+              --connect-timeout 30 \
+              --max-time 300 \
+              -H "Accept: application/json" \
+              "$URL" \
+              -o "$OUT"
+
+            if [ ! -s "$OUT" ]; then
+              echo "ERROR: Empty file:"
+              echo "$OUT"
+              exit 1
+            fi
+
+            if ! jq empty "$OUT" >/dev/null 2>&1; then
+              echo "ERROR: Invalid JSON:"
+              echo "$OUT"
+              exit 1
+            fi
+
+            echo "Downloaded:"
+            ls -lh "$OUT"
+          }
+
+          # القرآن الكريم
+          download_json \
+            "https://i-muslim.com/api/v1/translations/quran/ar" \
+            "$ROOT/assets/data/quran/i-muslim-quran-ar.json"
+
+          # صحيح البخاري
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/bukhari/ar" \
+            "$BOOKS/sahih-al-bukhari.json"
+
+          # صحيح مسلم
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/muslim/ar" \
+            "$BOOKS/sahih-muslim.json"
+
+          # سنن أبي داود
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/abudawud/ar" \
+            "$BOOKS/sunan-abi-dawud.json"
+
+          # جامع الترمذي
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/tirmidhi/ar" \
+            "$BOOKS/jami-at-tirmidhi.json"
+
+          # سنن النسائي
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/nasai/ar" \
+            "$BOOKS/sunan-an-nasai.json"
+
+          # سنن ابن ماجه
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/ibnmajah/ar" \
+            "$BOOKS/sunan-ibn-majah.json"
+
+          # موطأ مالك
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/malik/ar" \
+            "$BOOKS/muwatta-malik.json"
+
+          # الأربعون النووية
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/nawawi/ar" \
+            "$BOOKS/forty-nawawi.json"
+
+          # الأربعون القدسية
+          download_json \
+            "https://i-muslim.com/api/v1/translations/hadith/qudsi/ar" \
+            "$BOOKS/forty-qudsi.json"
+
+      # --------------------------------------------------
+      # 7. Verify actual text
+      # --------------------------------------------------
+      - name: Verify downloaded content
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.root.outputs.content_root }}"
+          BOOKS="$ROOT/assets/data/books"
+
+          echo "=========================================="
+          echo "VERIFYING DATA"
+          echo "=========================================="
+
+          echo
+          echo "Books:"
+          find "$BOOKS" -type f -name "*.json" -print
+
+          echo
+          echo "Sizes:"
+          du -h "$BOOKS"/*.json
+
+          echo
+          echo "Checking text fields..."
+
+          for FILE in "$BOOKS"/*.json; do
+            echo "Checking $FILE"
+
+            jq -e '
+              (
+                .. |
+                objects |
+                .text? //
+                empty
+              ) |
+              select(type == "string" and length > 0)
+            ' "$FILE" >/dev/null
+
+            echo "OK: actual Arabic text found"
+          done
+
+          echo
+          echo "Quran:"
+          jq '
+            if .data.items
+            then .data.items | length
+            else
+              if .items
+              then .items | length
+              else length
+              end
+            end
+          ' "$ROOT/assets/data/quran/i-muslim-quran-ar.json" \
+          || true
+
+      # --------------------------------------------------
+      # 8. Create metadata
+      # --------------------------------------------------
+      - name: Create content manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.root.outputs.content_root }}"
+
+          cat > "$ROOT/assets/data/content-manifest-5.3.json" <<'JSON'
+          {
+            "version": "5.3",
+            "offline": true,
+            "source": "i-muslim",
+            "datasets": [
+              {
+                "id": "quran-ar",
+                "name_ar": "القرآن الكريم",
+                "file": "quran/i-muslim-quran-ar.json"
+              },
+              {
+                "id": "bukhari",
+                "name_ar": "صحيح البخاري",
+                "file": "books/sahih-al-bukhari.json"
+              },
+              {
+                "id": "muslim",
+                "name_ar": "صحيح مسلم",
+                "file": "books/sahih-muslim.json"
+              },
+              {
+                "id": "abudawud",
+                "name_ar": "سنن أبي داود",
+                "file": "books/sunan-abi-dawud.json"
+              },
+              {
+                "id": "tirmidhi",
+                "name_ar": "جامع الترمذي",
+                "file": "books/jami-at-tirmidhi.json"
+              },
+              {
+                "id": "nasai",
+                "name_ar": "سنن النسائي",
+                "file": "books/sunan-an-nasai.json"
+              },
+              {
+                "id": "ibnmajah",
+                "name_ar": "سنن ابن ماجه",
+                "file": "books/sunan-ibn-majah.json"
+              },
+              {
+                "id": "malik",
+                "name_ar": "موطأ مالك",
+                "file": "books/muwatta-malik.json"
+              },
+              {
+                "id": "nawawi40",
+                "name_ar": "الأربعون النووية",
+                "file": "books/forty-nawawi.json"
+              },
+              {
+                "id": "qudsi40",
+                "name_ar": "الأربعون القدسية",
+                "file": "books/forty-qudsi.json"
+              }
+            ]
+          }
+          JSON
+
+      # --------------------------------------------------
+      # 9. Final size and file report
+      # --------------------------------------------------
+      - name: Final report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.root.outputs.content_root }}"
+
+          echo
+          echo "=========================================="
+          echo "FINAL 5.3 CONTENT"
+          echo "=========================================="
+
+          find "$ROOT/assets/data" \
+            -type f \
+            -printf "%p\t%k KB\n" \
+            | sort
+
+          echo
+          echo "TOTAL SIZE:"
+          du -sh "$ROOT"
+
+      # --------------------------------------------------
+      # 10. Create ZIP
+      # --------------------------------------------------
+      - name: Create Maktab Islami 5.3 Full ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.root.outputs.content_root }}"
+
+          cd "$(dirname "$ROOT")"
+
+          zip -r \
+            "$GITHUB_WORKSPACE/Maktab-Islami-5.3-FULL.zip" \
+            "$(basename "$ROOT")"
+
+          cd "$GITHUB_WORKSPACE"
+
+          echo
+          echo "FINAL ZIP:"
+          ls -lh Maktab-Islami-5.3-FULL.zip
+
+      # --------------------------------------------------
+      # 11. Upload Artifact
+      # --------------------------------------------------
+      - name: Upload Maktab Islami 5.3 Full
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maktab-Islami-5.3-FULL
+          path: Maktab-Islami-5.3-FULL.zip
+          if-no-files-found: error
+          retention-days: 30
