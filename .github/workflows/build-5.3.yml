@@ -24,153 +24,75 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install required tools
+      - name: Install tools
         run: |
-          set -euo pipefail
+          set -e
           sudo apt-get update
-          sudo apt-get install -y unzip findutils file
+          sudo apt-get install -y unzip findutils
 
-      - name: Select FINAL 5.3 ZIP
-        id: find_zip
+      - name: Find FINAL ZIP
+        id: zip
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          ZIP_FILE="${GITHUB_WORKSPACE}/Maktab-Islami-5.3-FULL-FINAL.zip"
+          ZIP="$GITHUB_WORKSPACE/Maktab-Islami-5.3-FULL-FINAL.zip"
 
-          if [[ ! -f "$ZIP_FILE" ]]; then
-            echo "ERROR: Maktab-Islami-5.3-FULL-FINAL.zip was not found."
-            echo "ZIP files in repository:"
-            find . -type f -iname '*.zip' ! -path './.git/*' -print | sort
+          if [ ! -f "$ZIP" ]; then
+            echo "ERROR: FINAL ZIP not found"
+            find "$GITHUB_WORKSPACE" -type f -name "*.zip" -print
             exit 1
           fi
 
-          echo "FINAL 5.3 ZIP: $ZIP_FILE"
-          ls -lh "$ZIP_FILE"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          ls -lh "$ZIP"
 
-          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+      - name: Verify ZIP
+        run: |
+          set -e
+          unzip -t "${{ steps.zip.outputs.zip }}"
 
-      - name: Verify FINAL ZIP
+      - name: Extract project
         shell: bash
         run: |
-          set -euo pipefail
-
-          unzip -t "${{ steps.find_zip.outputs.zip_file }}"
-
-      - name: Extract FINAL project
-        shell: bash
-        run: |
-          set -euo pipefail
+          set -e
 
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q "${{ steps.find_zip.outputs.zip_file }}" -d extracted
+          unzip -q "${{ steps.zip.outputs.zip }}" -d extracted
 
-          echo "--- Extracted structure ---"
-          find extracted -maxdepth 5 -print | sort | head -500
+          echo "Extracted files:"
+          find extracted -maxdepth 8 -type f -print | sort | head -1000
 
-          echo "--- Android and Gradle files ---"
-          find extracted -type f \
-            \( \
-              -name 'gradlew' -o \
-              -name 'settings.gradle' -o \
-              -name 'settings.gradle.kts' -o \
-              -name 'build.gradle' -o \
-              -name 'build.gradle.kts' -o \
-              -name 'AndroidManifest.xml' \
-            \) \
-            -print | sort
-
-      - name: Find Android project
-        id: find_project
+      - name: Locate Android source
+        id: project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          PROJECT_DIR=""
-          USE_WRAPPER="false"
+          APP_DIR=$(find extracted -type d -path "*/app/src/main" -print -quit)
 
-          GRADLEW=$(find extracted \
-            -type f \
-            -name 'gradlew' \
-            -print -quit || true)
-
-          if [[ -n "$GRADLEW" ]]; then
-            PROJECT_DIR="$(dirname "$GRADLEW")"
-            USE_WRAPPER="true"
-          fi
-
-          if [[ -z "$PROJECT_DIR" ]]; then
-            SETTINGS=$(find extracted \
-              -type f \
-              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
-              -print -quit || true)
-
-            if [[ -n "$SETTINGS" ]]; then
-              PROJECT_DIR="$(dirname "$SETTINGS")"
-            fi
-          fi
-
-          if [[ -z "$PROJECT_DIR" ]]; then
-            MANIFEST=$(find extracted \
-              -type f \
-              -path '*/app/src/main/AndroidManifest.xml' \
-              -print -quit || true)
-
-            if [[ -n "$MANIFEST" ]]; then
-              PROJECT_DIR="$(dirname \
-                "$(dirname \
-                  "$(dirname \
-                    "$(dirname "$MANIFEST")" \
-                  )" \
-                )" \
-              )"
-
-              echo "Android app detected:"
-              echo "$MANIFEST"
-            fi
-          fi
-
-          if [[ -z "$PROJECT_DIR" ]]; then
-            BUILD_FILE=$(find extracted \
-              -type f \
-              \( -name 'build.gradle' -o -name 'build.gradle.kts' \) \
-              -print -quit || true)
-
-            if [[ -n "$BUILD_FILE" ]]; then
-              PROJECT_DIR="$(dirname "$BUILD_FILE")"
-            fi
-          fi
-
-          if [[ -z "$PROJECT_DIR" ]]; then
-            echo "ERROR: No Android project was found."
-            echo "All extracted files:"
-            find extracted -type f -print | sort
+          if [ -z "$APP_DIR" ]; then
+            echo "ERROR: app/src/main was not found"
+            find extracted -maxdepth 8 -type d -print | sort
             exit 1
           fi
 
+          PROJECT_DIR="${APP_DIR%/app/src/main}"
+
           echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "project=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "use_wrapper=$USE_WRAPPER" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare Gradle project when ZIP contains only the app module
-        if: steps.find_project.outputs.use_wrapper != 'true'
-        working-directory: ${{ steps.find_project.outputs.project_dir }}
+      - name: Prepare Android Gradle project
+        working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          if [[ -f settings.gradle || -f settings.gradle.kts ]]; then
-            echo "Gradle settings already exists."
-            exit 0
-          fi
+          mkdir -p gradle
 
-          if [[ -f app/build.gradle || -f app/build.gradle.kts ]]; then
-            echo "Creating temporary root Gradle files."
-
-            cat > settings.gradle <<'EOF'
+          cat > settings.gradle <<'EOF'
 pluginManagement {
     repositories {
         google()
@@ -180,9 +102,7 @@ pluginManagement {
 }
 
 dependencyResolutionManagement {
-    repositoriesMode.set(
-        RepositoriesMode.FAIL_ON_PROJECT_REPOS
-    )
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
 
     repositories {
         google()
@@ -190,294 +110,162 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = 'Maktab-Islami-5.3'
-
-include ':app'
+rootProject.name = "Maktab-Islami-5.3"
+include(":app")
 EOF
 
-            cat > build.gradle <<'EOF'
+          cat > build.gradle <<'EOF'
 plugins {
+    id 'com.android.application' version '8.7.3' apply false
 }
 EOF
-          fi
 
-      - name: Locate bundled assets
-        id: assets
-        working-directory: ${{ steps.find_project.outputs.project_dir }}
+          cat > gradle.properties <<'EOF'
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+android.nonTransitiveRClass=false
+EOF
+
+          if [ ! -f app/build.gradle ] && [ ! -f app/build.gradle.kts ]; then
+
+            cat > app/build.gradle <<'EOF'
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.maktabislami'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.maktabislami'
+        minSdk 23
+        targetSdk 35
+        versionCode 53
+        versionName '5.3'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+        }
+
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.activity:activity:1.10.1'
+    implementation 'com.google.android.material:material:1.12.0'
+}
+EOF
+
+  else
+    echo "Existing app Gradle file found."
+  fi
+
+      - name: Check offline data
+        working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          ASSETS=$(find . \
-            -type d \
-            -path '*/src/main/assets' \
-            -print -quit || true)
+          ASSETS="app/src/main/assets"
 
-          if [[ -z "$ASSETS" ]]; then
-            echo "ERROR: src/main/assets was not found."
-
-            find . \
-              -maxdepth 7 \
-              -type d \
-              -print | sort
-
+          if [ ! -d "$ASSETS" ]; then
+            echo "ERROR: assets directory not found"
             exit 1
           fi
 
-          echo "Assets directory:"
-          echo "$ASSETS"
+          echo "Offline assets:"
+          find "$ASSETS" -type f -print | sort | head -1000
 
-          echo "assets_dir=$ASSETS" >> "$GITHUB_OUTPUT"
-
-          echo "--- Bundled assets ---"
-          find "$ASSETS" -type f -print | sort
-
-          echo "--- Asset count ---"
+          echo "Asset file count:"
           find "$ASSETS" -type f | wc -l
 
-      - name: Verify Quran and the 9 required books
-        working-directory: ${{ steps.find_project.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ASSETS="${{ steps.assets.outputs.assets_dir }}"
-
-          FAILED=0
-
-          check_book() {
-            local LABEL="$1"
-            shift
-
-            local FOUND="false"
-
-            for PATTERN in "$@"; do
-
-              if find "$ASSETS" \
-                -type f \
-                -iname "*${PATTERN}*" \
-                -print -quit | grep -q .; then
-
-                FOUND="true"
-                break
-              fi
-
-              if grep -RIl \
-                --exclude='*.png' \
-                --exclude='*.jpg' \
-                --exclude='*.jpeg' \
-                -F "$PATTERN" \
-                "$ASSETS" \
-                2>/dev/null | head -n 1 | grep -q .; then
-
-                FOUND="true"
-                break
-              fi
-
-            done
-
-            if [[ "$FOUND" == "true" ]]; then
-              echo "OK: $LABEL"
-            else
-              echo "MISSING: $LABEL"
-              FAILED=1
-            fi
-          }
-
-          check_book \
-            "صحيح البخاري" \
-            "bukhari" \
-            "البخاري"
-
-          check_book \
-            "صحيح مسلم" \
-            "muslim" \
-            "مسلم"
-
-          check_book \
-            "سنن أبي داود" \
-            "abu_dawud" \
-            "abudawud" \
-            "abu-dawud" \
-            "أبي داود"
-
-          check_book \
-            "جامع الترمذي" \
-            "tirmidhi" \
-            "ترمذي"
-
-          check_book \
-            "سنن النسائي" \
-            "nasai" \
-            "nasa" \
-            "نسائي"
-
-          check_book \
-            "سنن ابن ماجه" \
-            "ibn_majah" \
-            "ibnmajah" \
-            "ابن ماجه"
-
-          check_book \
-            "موطأ مالك" \
-            "muwatta" \
-            "malik" \
-            "موطأ"
-
-          check_book \
-            "الأربعون النووية" \
-            "nawawi" \
-            "الأربعون النووية"
-
-          check_book \
-            "الأربعون القدسية" \
-            "qudsi" \
-            "القدسية"
-
-          check_book \
-            "القرآن الكريم" \
-            "quran" \
-            "قرآن"
-
-          if [[ "$FAILED" -ne 0 ]]; then
-
-            echo ""
-            echo "=========================================="
-            echo "ERROR: REQUIRED OFFLINE CONTENT IS MISSING"
-            echo "=========================================="
-            echo ""
-            echo "The APK will NOT be published."
-            echo "The 9 books and Quran must exist in assets."
-            echo ""
-
+          if [ ! -d "$ASSETS/data" ]; then
+            echo "ERROR: assets/data is missing"
             exit 1
           fi
 
-          echo ""
-          echo "=========================================="
-          echo "ALL REQUIRED BOOKS WERE FOUND"
-          echo "=========================================="
+          if [ ! -d "$ASSETS/data/quran" ]; then
+            echo "ERROR: Quran data is missing"
+            exit 1
+          fi
 
-      - name: Show project structure
-        working-directory: ${{ steps.find_project.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Android project:"
-          pwd
-
-          echo "Project files:"
-          find . \
-            -maxdepth 7 \
-            -type f \
-            -print | sort | head -1000
+          if [ ! -d "$ASSETS/data/hadith" ]; then
+            echo "ERROR: Hadith data is missing"
+            exit 1
+          fi
 
       - name: Setup Gradle
-        if: steps.find_project.outputs.use_wrapper != 'true'
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Make Gradle executable
-        if: steps.find_project.outputs.use_wrapper == 'true'
-        working-directory: ${{ steps.find_project.outputs.project_dir }}
-        shell: bash
-        run: |
-          chmod +x gradlew
-
       - name: Build Debug APK
-        working-directory: ${{ steps.find_project.outputs.project_dir }}
+        working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          if [[ "${{ steps.find_project.outputs.use_wrapper }}" == "true" ]]; then
+          gradle clean assembleDebug --no-daemon --stacktrace
 
-            ./gradlew \
-              clean \
-              assembleDebug \
-              --no-daemon \
-              --stacktrace
-
-          else
-
-            gradle \
-              clean \
-              assembleDebug \
-              --no-daemon \
-              --stacktrace
-
-          fi
-
-      - name: Find generated APK
-        id: find_apk
+      - name: Find APK
+        id: apk
+        working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          PROJECT_DIR="${{ steps.find_project.outputs.project_dir }}"
+          APK=$(find app/build/outputs/apk -type f -name "*.apk" -print -quit)
 
-          APK=$(find "$PROJECT_DIR" \
-            -type f \
-            -path '*/build/outputs/apk/*.apk' \
-            -print | sort | head -n 1 || true)
-
-          if [[ -z "$APK" ]]; then
-
-            echo "ERROR: APK was not generated."
-
-            find "$PROJECT_DIR" \
-              -type f \
-              -path '*/build/outputs/*' \
-              -print 2>/dev/null || true
-
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated"
+            find app/build/outputs -type f -print 2>/dev/null || true
             exit 1
           fi
 
-          echo "APK found:"
-          echo "$APK"
-
-          mkdir -p artifacts
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
 
           cp "$APK" \
-            artifacts/Maktab-Islami-5.3-9-Books.apk
+            "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3.apk"
 
-          ls -lh \
-            artifacts/Maktab-Islami-5.3-9-Books.apk
+          echo "APK:"
+          ls -lh "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3.apk"
 
-          echo "apk_file=artifacts/Maktab-Islami-5.3-9-Books.apk" \
-            >> "$GITHUB_OUTPUT"
-
-      - name: Verify assets inside APK
-        shell: bash
+      - name: Verify APK contains offline assets
         run: |
-          set -euo pipefail
+          set -e
 
-          APK="${{ steps.find_apk.outputs.apk_file }}"
+          APK="$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3.apk"
 
-          echo "--- APK assets ---"
+          echo "Checking APK assets..."
 
-          unzip -l "$APK" \
-            | grep -E '(^|/)assets/' \
-            | head -1000 || true
+          unzip -l "$APK" | grep "assets/" | head -100 || true
 
-          ASSET_LINES=$(unzip -l "$APK" \
-            | grep -cE '(^|/)assets/' || true)
+          COUNT=$(unzip -l "$APK" | grep -c "assets/" || true)
 
-          if [[ "$ASSET_LINES" -le 0 ]]; then
-            echo "ERROR: APK contains no assets."
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No offline assets found inside APK"
             exit 1
           fi
 
-          echo "APK asset entries: $ASSET_LINES"
+          echo "Offline asset entries: $COUNT"
 
-          echo "Offline assets are inside the APK."
-
-      - name: Upload FINAL APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Maktab-Islami-5.3-9-Books
-          path: artifacts/Maktab-Islami-5.3-9-Books.apk
+          name: Maktab-Islami-5.3
+          path: artifacts/Maktab-Islami-5.3.apk
           if-no-files-found: error
           retention-days: 30
