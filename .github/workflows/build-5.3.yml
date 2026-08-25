@@ -1,5 +1,3 @@
-build-5.3.yml
-
 name: Build Maktab Islami 5.3
 
 on:
