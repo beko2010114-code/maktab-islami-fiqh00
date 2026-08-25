@@ -1,0 +1,194 @@
+name: Build Maktab Islami 5.3 - FINAL APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Locate Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="$GITHUB_WORKSPACE"
+
+          if [ ! -f "$PROJECT/settings.gradle" ] || [ ! -f "$PROJECT/app/build.gradle" ]; then
+            PROJECT="$(find "$GITHUB_WORKSPACE" -type f -path '*/app/build.gradle' -print -quit | xargs -r dirname | xargs -r dirname)"
+          fi
+
+          if [ -z "$PROJECT" ] || [ ! -f "$PROJECT/settings.gradle" ] || [ ! -f "$PROJECT/app/build.gradle" ]; then
+            echo "ERROR: Android project was not found."
+            find "$GITHUB_WORKSPACE" -maxdepth 8 -type f -print | sort
+            exit 1
+          fi
+
+          echo "PROJECT=$PROJECT"
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+
+      - name: Validate project
+        working-directory: ${{ steps.project.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f settings.gradle
+          test -f build.gradle
+          test -f app/build.gradle
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/src/main/assets/index.html
+          test -f app/src/main/assets/data/quran.json
+
+          grep -q "com.android.application.*8.6.1" build.gradle
+          grep -q "compileSdk 35" app/build.gradle
+          grep -q "minSdk 23" app/build.gradle
+          grep -q "targetSdk 35" app/build.gradle
+          grep -q "versionCode 53" app/build.gradle
+          grep -q "versionName '5.3.0'" app/build.gradle
+          grep -q "androidx.webkit:webkit:1.15.0" app/build.gradle
+
+          echo "Project validation: PASS"
+
+      - name: Validate offline content
+        working-directory: ${{ steps.project.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("app/src/main/assets/data")
+
+          quran = json.loads((root / "quran.json").read_text(encoding="utf-8"))
+          assert len(quran) == 114, len(quran)
+          assert sum(len(s["verses"]) for s in quran) == 6236
+
+          books = {
+              "bukhari.json": 7589,
+              "muslim.json": 7563,
+              "abudawud.json": 5274,
+              "tirmidhi.json": 3998,
+              "nasai.json": 5765,
+              "ibnmajah.json": 4343,
+              "malik.json": 1858,
+              "nawawi40.json": 42,
+              "qudsi40.json": 40,
+          }
+
+          total = 0
+
+          for name, expected in books.items():
+              path = root / "hadith" / name
+              assert path.is_file(), path
+
+              data = json.loads(path.read_text(encoding="utf-8"))
+              items = data["data"]["items"]
+
+              assert len(items) == expected, (name, len(items), expected)
+              total += len(items)
+
+          assert total == 36472, total
+
+          print("Quran: 6236 verses")
+          print("Nine books: 36472 records")
+          print("JSON validation: PASS")
+          PY
+
+      - name: Validate WebView security
+        working-directory: ${{ steps.project.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN="app/src/main/java/com/maktabislami/fiqh/MainActivity.java"
+
+          test -f "$MAIN"
+          grep -q "WebViewAssetLoader" "$MAIN"
+          grep -q "appassets.androidplatform.net/assets/index.html" "$MAIN"
+
+          if grep -q "setAllowUniversalAccessFromFileURLs(true)" "$MAIN"; then
+            echo "ERROR: insecure universal file access is enabled."
+            exit 1
+          fi
+
+          if grep -q "setAllowFileAccessFromFileURLs(true)" "$MAIN"; then
+            echo "ERROR: insecure file URL access is enabled."
+            exit 1
+          fi
+
+          echo "WebView validation: PASS"
+
+      - name: Build Debug APK
+        working-directory: ${{ steps.project.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle clean assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK
+        working-directory: ${{ steps.project.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+
+          required=(
+            "assets/index.html"
+            "assets/data/quran.json"
+            "assets/data/hadith/bukhari.json"
+            "assets/data/hadith/muslim.json"
+            "assets/data/hadith/abudawud.json"
+            "assets/data/hadith/tirmidhi.json"
+            "assets/data/hadith/nasai.json"
+            "assets/data/hadith/ibnmajah.json"
+            "assets/data/hadith/malik.json"
+            "assets/data/hadith/nawawi40.json"
+            "assets/data/hadith/qudsi40.json"
+          )
+
+          for file in "${required[@]}"; do
+            unzip -l "$APK" | grep -F "$file" >/dev/null
+            echo "APK contains: $file"
+          done
+
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$APK" "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3-FINAL.apk"
+
+          ls -lh "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3-FINAL.apk"
+
+      - name: Upload FINAL APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maktab-Islami-5.3-FINAL-APK
+          path: artifacts/Maktab-Islami-5.3-FINAL.apk
+          if-no-files-found: error
+          retention-days: 30
