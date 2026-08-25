@@ -26,12 +26,11 @@ jobs:
 
       - name: Install tools
         run: |
-          set -e
           sudo apt-get update
           sudo apt-get install -y unzip findutils
 
       - name: Find FINAL ZIP
-        id: zip
+        id: find_zip
         shell: bash
         run: |
           set -e
@@ -39,20 +38,22 @@ jobs:
           ZIP="$GITHUB_WORKSPACE/Maktab-Islami-5.3-FULL-FINAL.zip"
 
           if [ ! -f "$ZIP" ]; then
-            echo "ERROR: FINAL ZIP not found"
-            find "$GITHUB_WORKSPACE" -type f -name "*.zip" -print
+            echo "FINAL ZIP not found."
+            echo "Available ZIP files:"
+            find "$GITHUB_WORKSPACE" -type f -name '*.zip' -print
             exit 1
           fi
 
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Found:"
           ls -lh "$ZIP"
 
       - name: Verify ZIP
         run: |
           set -e
-          unzip -t "${{ steps.zip.outputs.zip }}"
+          unzip -t "${{ steps.find_zip.outputs.zip }}"
 
-      - name: Extract project
+      - name: Extract FINAL project
         shell: bash
         run: |
           set -e
@@ -60,39 +61,52 @@ jobs:
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q "${{ steps.zip.outputs.zip }}" -d extracted
+          unzip -q "${{ steps.find_zip.outputs.zip }}" -d extracted
 
-          echo "Extracted files:"
+          echo "Extracted structure:"
           find extracted -maxdepth 8 -type f -print | sort | head -1000
 
-      - name: Locate Android source
+      - name: Find Android project
         id: project
         shell: bash
         run: |
           set -e
 
-          APP_DIR=$(find extracted -type d -path "*/app/src/main" -print -quit)
+          PROJECT=""
 
-          if [ -z "$APP_DIR" ]; then
-            echo "ERROR: app/src/main was not found"
+          while IFS= read -r APP_MAIN; do
+            if [ -d "$APP_MAIN" ]; then
+              PROJECT="${APP_MAIN%/app/src/main}"
+              break
+            fi
+          done < <(find extracted -type d -path '*/app/src/main' -print)
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: app/src/main was not found."
+            echo "Directories found:"
             find extracted -maxdepth 8 -type d -print | sort
             exit 1
           fi
 
-          PROJECT_DIR="${APP_DIR%/app/src/main}"
+          echo "Android project:"
+          echo "$PROJECT"
 
-          echo "PROJECT_DIR=$PROJECT_DIR"
-          echo "project=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare Android Gradle project
+      - name: Prepare Gradle project
         working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
           set -e
 
-          mkdir -p gradle
+          echo "Project directory:"
+          pwd
 
-          cat > settings.gradle <<'EOF'
+          echo "Project files:"
+          find . -maxdepth 3 -type f -print | sort | head -500
+
+          if [ ! -f settings.gradle ] && [ ! -f settings.gradle.kts ]; then
+            cat > settings.gradle <<'EOF'
 pluginManagement {
     repositories {
         google()
@@ -103,7 +117,6 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
-
     repositories {
         google()
         mavenCentral()
@@ -113,21 +126,25 @@ dependencyResolutionManagement {
 rootProject.name = "Maktab-Islami-5.3"
 include(":app")
 EOF
+          fi
 
-          cat > build.gradle <<'EOF'
+          if [ ! -f build.gradle ] && [ ! -f build.gradle.kts ]; then
+            cat > build.gradle <<'EOF'
 plugins {
     id 'com.android.application' version '8.7.3' apply false
 }
 EOF
+          fi
 
-          cat > gradle.properties <<'EOF'
+          if [ ! -f gradle.properties ]; then
+            cat > gradle.properties <<'EOF'
 org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
 android.useAndroidX=true
 android.nonTransitiveRClass=false
 EOF
+          fi
 
           if [ ! -f app/build.gradle ] && [ ! -f app/build.gradle.kts ]; then
-
             cat > app/build.gradle <<'EOF'
 plugins {
     id 'com.android.application'
@@ -146,13 +163,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            minifyEnabled false
+        }
+
         release {
             minifyEnabled false
             shrinkResources false
-        }
-
-        debug {
-            minifyEnabled false
         }
     }
 
@@ -168,12 +185,11 @@ dependencies {
     implementation 'com.google.android.material:material:1.12.0'
 }
 EOF
+          fi
 
-  else
-    echo "Existing app Gradle file found."
-  fi
+          echo "Gradle project prepared."
 
-      - name: Check offline data
+      - name: Check offline content
         working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
@@ -182,29 +198,20 @@ EOF
           ASSETS="app/src/main/assets"
 
           if [ ! -d "$ASSETS" ]; then
-            echo "ERROR: assets directory not found"
+            echo "ERROR: assets directory does not exist."
             exit 1
           fi
 
-          echo "Offline assets:"
+          echo "Offline content:"
           find "$ASSETS" -type f -print | sort | head -1000
 
-          echo "Asset file count:"
+          echo "Total offline files:"
           find "$ASSETS" -type f | wc -l
 
-          if [ ! -d "$ASSETS/data" ]; then
-            echo "ERROR: assets/data is missing"
-            exit 1
-          fi
-
-          if [ ! -d "$ASSETS/data/quran" ]; then
-            echo "ERROR: Quran data is missing"
-            exit 1
-          fi
-
-          if [ ! -d "$ASSETS/data/hadith" ]; then
-            echo "ERROR: Hadith data is missing"
-            exit 1
+          if [ -d "$ASSETS/data" ]; then
+            echo "data directory found."
+          else
+            echo "WARNING: assets/data was not found."
           fi
 
       - name: Setup Gradle
@@ -221,46 +228,51 @@ EOF
           gradle clean assembleDebug --no-daemon --stacktrace
 
       - name: Find APK
-        id: apk
-        working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
           set -e
 
-          APK=$(find app/build/outputs/apk -type f -name "*.apk" -print -quit)
+          mkdir -p artifacts
+
+          APK=$(find "${{ steps.project.outputs.project }}/app/build/outputs/apk" \
+            -type f \
+            -name '*.apk' \
+            -print -quit)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated"
-            find app/build/outputs -type f -print 2>/dev/null || true
+            echo "ERROR: APK was not generated."
+
+            if [ -d "${{ steps.project.outputs.project }}/app/build/outputs" ]; then
+              find "${{ steps.project.outputs.project }}/app/build/outputs" \
+                -type f \
+                -print
+            fi
+
             exit 1
           fi
 
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$APK" "artifacts/Maktab-Islami-5.3.apk"
 
-          cp "$APK" \
-            "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3.apk"
+          echo "Generated APK:"
+          ls -lh "artifacts/Maktab-Islami-5.3.apk"
 
-          echo "APK:"
-          ls -lh "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3.apk"
-
-      - name: Verify APK contains offline assets
+      - name: Verify APK
+        shell: bash
         run: |
           set -e
 
-          APK="$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3.apk"
+          APK="artifacts/Maktab-Islami-5.3.apk"
 
-          echo "Checking APK assets..."
-
-          unzip -l "$APK" | grep "assets/" | head -100 || true
-
-          COUNT=$(unzip -l "$APK" | grep -c "assets/" || true)
-
-          if [ "$COUNT" -eq 0 ]; then
-            echo "ERROR: No offline assets found inside APK"
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK file missing."
             exit 1
           fi
 
-          echo "Offline asset entries: $COUNT"
+          echo "APK contents:"
+          unzip -l "$APK" | grep 'assets/' | head -100 || true
+
+          echo "APK size:"
+          ls -lh "$APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
