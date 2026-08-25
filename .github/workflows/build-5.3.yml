@@ -1,3 +1,5 @@
+build-5.3.yml
+
 name: Build Maktab Islami 5.3
 
 on:
@@ -28,7 +30,6 @@ jobs:
       - name: Install required tools
         run: |
           set -e
-
           sudo apt-get update
           sudo apt-get install -y unzip findutils
 
@@ -41,30 +42,20 @@ jobs:
           ZIP_FILE="./Maktab-Islami-5.3-FULL-FINAL.zip"
 
           echo "Checking for FINAL 5.3 package..."
-          echo "Expected ZIP: $ZIP_FILE"
 
           if [ ! -f "$ZIP_FILE" ]; then
-            echo ""
             echo "ERROR: FINAL 5.3 ZIP was not found."
-            echo ""
             echo "ZIP files currently in repository:"
-            find . \
-              -type f \
-              -iname "*.zip" \
-              ! -path "./.git/*" \
-              -print | sort
-
+            find . -type f -iname "*.zip" ! -path "./.git/*" -print | sort
             exit 1
           fi
 
-          echo ""
           echo "FINAL 5.3 ZIP FOUND:"
           ls -lh "$ZIP_FILE"
 
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Verify FINAL ZIP
-        working-directory: .
         shell: bash
         run: |
           set -e
@@ -74,10 +65,8 @@ jobs:
           echo "Verifying ZIP archive..."
           unzip -t "$ZIP_FILE"
 
-          echo ""
-          echo "ZIP verification completed successfully."
-
       - name: Extract FINAL project
+        shell: bash
         run: |
           set -e
 
@@ -86,30 +75,23 @@ jobs:
 
           ZIP_FILE="${{ steps.find_zip.outputs.zip_file }}"
 
-          echo "Extracting:"
-          echo "$ZIP_FILE"
-
           unzip -q "$ZIP_FILE" -d extracted
 
-          echo ""
           echo "Extraction completed."
 
-          echo ""
-          echo "Extracted directory structure:"
+          echo "Extracted directories:"
           find extracted -maxdepth 7 -type d -print | sort
 
-          echo ""
-          echo "Important files:"
-          find extracted \
-            -type f \
-            \
+          echo "Important project files:"
+          find extracted -type f \
+            \( \
               -name "gradlew" \
               -o -name "settings.gradle" \
               -o -name "settings.gradle.kts" \
               -o -name "build.gradle" \
               -o -name "build.gradle.kts" \
               -o -name "AndroidManifest.xml" \
-            \
+            \) \
             -print | sort
 
       - name: Find Android project
@@ -129,13 +111,8 @@ jobs:
           if [ -n "$GRADLEW" ]; then
             PROJECT_DIR=$(dirname "$GRADLEW")
 
-            echo ""
             echo "Gradle wrapper found:"
             echo "$GRADLEW"
-
-            echo ""
-            echo "Android project directory:"
-            echo "$PROJECT_DIR"
 
             echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
             echo "use_wrapper=true" >> "$GITHUB_OUTPUT"
@@ -148,23 +125,18 @@ jobs:
 
           SETTINGS_FILE=$(find extracted \
             -type f \
-            \
+            \( \
               -name "settings.gradle" \
               -o -name "settings.gradle.kts" \
-            \
+            \) \
             ! -path "*/.git/*" \
             -print | head -n 1)
 
           if [ -n "$SETTINGS_FILE" ]; then
             PROJECT_DIR=$(dirname "$SETTINGS_FILE")
 
-            echo ""
             echo "Gradle settings file found:"
             echo "$SETTINGS_FILE"
-
-            echo ""
-            echo "Android project directory:"
-            echo "$PROJECT_DIR"
 
             echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
             echo "use_wrapper=false" >> "$GITHUB_OUTPUT"
@@ -177,15 +149,197 @@ jobs:
 
           BUILD_FILE=$(find extracted \
             -type f \
-            \
+            \( \
               -name "build.gradle" \
               -o -name "build.gradle.kts" \
-            \
+            \) \
             ! -path "*/.git/*" \
             -print | head -n 1)
 
           if [ -n "$BUILD_FILE" ]; then
             PROJECT_DIR=$(dirname "$BUILD_FILE")
 
-            echo ""
-            echo "
+            echo "Gradle build file found:"
+            echo "$BUILD_FILE"
+
+            echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+            echo "use_wrapper=false" >> "$GITHUB_OUTPUT"
+
+            exit 0
+          fi
+
+          echo "ERROR: No Android Gradle project found."
+
+          echo "All extracted files:"
+          find extracted -type f -print | sort
+
+          exit 1
+
+      - name: Show project structure
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          echo "Android project:"
+          pwd
+
+          echo "Project files:"
+          find . -maxdepth 5 -type f -print | sort | head -500
+
+      - name: Check bundled religious content
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          ASSETS="app/src/main/assets"
+
+          if [ ! -d "$ASSETS" ]; then
+            echo "WARNING: Assets directory not found:"
+            echo "$ASSETS"
+          else
+            echo "Bundled assets:"
+            find "$ASSETS" -type f -print | sort | head -1000
+
+            echo "Asset file count:"
+            find "$ASSETS" -type f | wc -l
+          fi
+
+      - name: Verify Quran data
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          QURAN_FILE="app/src/main/assets/data/quran/quran.json"
+
+          if [ -f "$QURAN_FILE" ]; then
+            echo "Quran file found:"
+            ls -lh "$QURAN_FILE"
+          else
+            echo "WARNING: quran.json not found at:"
+            echo "$QURAN_FILE"
+
+            find app/src/main/assets \
+              -type f \
+              \( -iname "*quran*" -o -iname "*قرآن*" \) \
+              -print | sort || true
+          fi
+
+      - name: Verify books data
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          BOOKS_DIR="app/src/main/assets/data/books"
+
+          if [ -d "$BOOKS_DIR" ]; then
+            echo "Book files:"
+            find "$BOOKS_DIR" -type f -print | sort
+
+            echo "Book file count:"
+            find "$BOOKS_DIR" -type f | wc -l
+          else
+            echo "WARNING: Books directory not found:"
+            echo "$BOOKS_DIR"
+          fi
+
+      - name: Make Gradle executable
+        if: steps.find_project.outputs.use_wrapper == 'true'
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+          chmod +x gradlew
+
+      - name: Setup Gradle
+        if: steps.find_project.outputs.use_wrapper != 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build APK with Gradle Wrapper
+        if: steps.find_project.outputs.use_wrapper == 'true'
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          ./gradlew clean assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      - name: Build APK with installed Gradle
+        if: steps.find_project.outputs.use_wrapper != 'true'
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          gradle clean assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      - name: Find generated APK
+        id: find_apk
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR="${{ steps.find_project.outputs.project_dir }}"
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/*.apk" \
+            -print | sort | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated."
+
+            find "$PROJECT_DIR" \
+              -type f \
+              -path "*/build/outputs/*" \
+              -print 2>/dev/null || true
+
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          mkdir -p artifacts
+
+          cp "$APK" \
+            "artifacts/Maktab-Islami-5.3-FULL-FINAL.apk"
+
+          ls -lh "artifacts/Maktab-Islami-5.3-FULL-FINAL.apk"
+
+          echo "apk_file=artifacts/Maktab-Islami-5.3-FULL-FINAL.apk" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Verify generated APK
+        shell: bash
+        run: |
+          set -e
+
+          APK="${{ steps.find_apk.outputs.apk_file }}"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: Final APK does not exist."
+            exit 1
+          fi
+
+          echo "Final APK:"
+          ls -lh "$APK"
+
+          file "$APK"
+
+      - name: Upload FINAL APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maktab-Islami-5.3-FULL-FINAL-APK
+          path: artifacts/Maktab-Islami-5.3-FULL-FINAL.apk
+          if-no-files-found: error
+          retention-days: 30
