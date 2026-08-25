@@ -1,10 +1,10 @@
 name: Build Maktab Islami 5.3
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,6 +13,7 @@ jobs:
   build:
     name: Build APK 5.3
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -24,67 +25,98 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip findutils
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
 
-      - name: Find FINAL ZIP
-        id: find_zip
-        shell: bash
-        run: |
-          set -e
-
-          ZIP="$GITHUB_WORKSPACE/Maktab-Islami-5.3-FULL-FINAL.zip"
-
-          if [ ! -f "$ZIP" ]; then
-            echo "FINAL ZIP not found."
-            echo "Available ZIP files:"
-            find "$GITHUB_WORKSPACE" -type f -name '*.zip' -print
-            exit 1
-          fi
-
-          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-          echo "Found:"
-          ls -lh "$ZIP"
-
-      - name: Verify ZIP
-        run: |
-          set -e
-          unzip -t "${{ steps.find_zip.outputs.zip }}"
-
-      - name: Extract FINAL project
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf extracted
-          mkdir -p extracted
-
-          unzip -q "${{ steps.find_zip.outputs.zip }}" -d extracted
-
-          echo "Extracted structure:"
-          find extracted -maxdepth 8 -type f -print | sort | head -1000
-
-      - name: Find Android project
+      - name: Select Android project
         id: project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          PROJECT=""
+          # الحالة الأولى:
+          # المشروع مفكوك مباشرة في جذر المستودع.
+          if [ -f "app/build.gradle" ] && [ -d "app/src/main/assets/data" ]; then
+            echo "project=$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"
+            echo "Using Android project from repository root."
+            exit 0
+          fi
 
-          while IFS= read -r APP_MAIN; do
-            if [ -d "$APP_MAIN" ]; then
-              PROJECT="${APP_MAIN%/app/src/main}"
+          # الحالة الثانية:
+          # المشروع موجود داخل ملف ZIP.
+          ZIP=""
+
+          for candidate in \
+            "$GITHUB_WORKSPACE/Maktab-Islami-5.3-FULL-FINAL-FIXED.zip" \
+            "$GITHUB_WORKSPACE/Maktab-Islami-5.3-FULL-FINAL.zip"; do
+
+            if [ -f "$candidate" ]; then
+              ZIP="$candidate"
               break
             fi
-          done < <(find extracted -type d -path '*/app/src/main' -print)
 
-          if [ -z "$PROJECT" ]; then
-            echo "ERROR: app/src/main was not found."
-            echo "Directories found:"
-            find extracted -maxdepth 8 -type d -print | sort
+          done
+
+          # بحث احتياطي عن أي ZIP للإصدار 5.3
+          if [ -z "$ZIP" ]; then
+            ZIP="$(find "$GITHUB_WORKSPACE" \
+              -type f \
+              -name '*Maktab*5.3*.zip' \
+              -print -quit || true)"
+          fi
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: Maktab Islami 5.3 ZIP was not found."
+
+            echo "Files in repository:"
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 5 \
+              -type f \
+              -print | sort
+
+            exit 1
+          fi
+
+          echo "Using ZIP:"
+          echo "$ZIP"
+
+          rm -rf "$GITHUB_WORKSPACE/extracted"
+
+          mkdir -p "$GITHUB_WORKSPACE/extracted"
+
+          unzip -q "$ZIP" \
+            -d "$GITHUB_WORKSPACE/extracted"
+
+          # العثور على مشروع Android الحقيقي
+          APP_GRADLE="$(
+            find "$GITHUB_WORKSPACE/extracted" \
+              -type f \
+              -path '*/app/build.gradle' \
+              -print -quit || true
+          )"
+
+          if [ -z "$APP_GRADLE" ]; then
+            echo "ERROR: app/build.gradle was not found."
+
+            echo "Extracted files:"
+            find "$GITHUB_WORKSPACE/extracted" \
+              -maxdepth 10 \
+              -type f \
+              -print | sort
+
+            exit 1
+          fi
+
+          PROJECT="${APP_GRADLE%/app/build.gradle}"
+
+          if [ ! -f "$PROJECT/settings.gradle" ]; then
+            echo "ERROR: settings.gradle is missing."
+
+            echo "Project:"
+            echo "$PROJECT"
+
             exit 1
           fi
 
@@ -93,186 +125,246 @@ jobs:
 
           echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare Gradle project
+      - name: Verify project configuration
         working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Project directory:"
-          pwd
+          echo "Checking Android project..."
 
-          echo "Project files:"
-          find . -maxdepth 3 -type f -print | sort | head -500
+          test -f settings.gradle
+          test -f build.gradle
+          test -f app/build.gradle
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/src/main/assets/index.html
 
-          if [ ! -f settings.gradle ] && [ ! -f settings.gradle.kts ]; then
-            cat > settings.gradle <<'EOF'
-pluginManagement {
-    repositories {
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }
-}
+          # يجب أن يكون AGP 8.7.3
+          grep -q \
+            "com.android.application.*8.7.3" \
+            build.gradle
 
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
+          # المشروع يستهدف API 35
+          grep -q \
+            "compileSdk 35" \
+            app/build.gradle
 
-rootProject.name = "Maktab-Islami-5.3"
-include(":app")
-EOF
-          fi
+          grep -q \
+            "targetSdk 35" \
+            app/build.gradle
 
-          if [ ! -f build.gradle ] && [ ! -f build.gradle.kts ]; then
-            cat > build.gradle <<'EOF'
-plugins {
-    id 'com.android.application' version '8.7.3' apply false
-}
-EOF
-          fi
+          # الإصدار 5.3
+          grep -q \
+            "versionCode 53" \
+            app/build.gradle
 
-          if [ ! -f gradle.properties ]; then
-            cat > gradle.properties <<'EOF'
-org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-android.useAndroidX=true
-android.nonTransitiveRClass=false
-EOF
-          fi
+          echo "Project configuration OK."
 
-          if [ ! -f app/build.gradle ] && [ ! -f app/build.gradle.kts ]; then
-            cat > app/build.gradle <<'EOF'
-plugins {
-    id 'com.android.application'
-}
-
-android {
-    namespace 'com.maktabislami'
-    compileSdk 35
-
-    defaultConfig {
-        applicationId 'com.maktabislami'
-        minSdk 23
-        targetSdk 35
-        versionCode 53
-        versionName '5.3'
-    }
-
-    buildTypes {
-        debug {
-            minifyEnabled false
-        }
-
-        release {
-            minifyEnabled false
-            shrinkResources false
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-}
-
-dependencies {
-    implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'androidx.activity:activity:1.10.1'
-    implementation 'com.google.android.material:material:1.12.0'
-}
-EOF
-          fi
-
-          echo "Gradle project prepared."
-
-      - name: Check offline content
+      - name: Verify offline content
         working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          ASSETS="app/src/main/assets"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
 
-          if [ ! -d "$ASSETS" ]; then
-            echo "ERROR: assets directory does not exist."
-            exit 1
-          fi
+          root = Path("app/src/main/assets/data")
 
-          echo "Offline content:"
-          find "$ASSETS" -type f -print | sort | head -1000
+          # ==========================================
+          # القرآن الكريم
+          # ==========================================
 
-          echo "Total offline files:"
-          find "$ASSETS" -type f | wc -l
+          quran_file = root / "quran/i-muslim-quran-ar.json"
 
-          if [ -d "$ASSETS/data" ]; then
-            echo "data directory found."
-          else
-            echo "WARNING: assets/data was not found."
-          fi
+          if not quran_file.is_file():
+              raise SystemExit(
+                  f"ERROR: Quran file missing: {quran_file}"
+              )
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
+          quran = json.loads(
+              quran_file.read_text(encoding="utf-8")
+          )
+
+          quran_items = quran["data"]["items"]
+
+          if len(quran_items) != 6236:
+              raise SystemExit(
+                  f"ERROR: Quran contains "
+                  f"{len(quran_items)} verses, expected 6236."
+              )
+
+          # ==========================================
+          # الكتب التسعة
+          # ==========================================
+
+          books = {
+              "sahih-al-bukhari.json": 7589,
+              "sahih-muslim.json": 7563,
+              "sunan-abi-dawud.json": 5274,
+              "jami-at-tirmidhi.json": 3998,
+              "sunan-an-nasai.json": 5765,
+              "sunan-ibn-majah.json": 4343,
+              "muwatta-malik.json": 1858,
+              "forty-nawawi.json": 42,
+              "forty-qudsi.json": 40,
+          }
+
+          total = 0
+
+          for filename, expected in books.items():
+
+              path = root / "books" / filename
+
+              if not path.is_file():
+                  raise SystemExit(
+                      f"ERROR: Missing book: {filename}"
+                  )
+
+              data = json.loads(
+                  path.read_text(encoding="utf-8")
+              )
+
+              if "data" not in data:
+                  raise SystemExit(
+                      f"ERROR: Invalid structure: {filename}"
+                  )
+
+              if "items" not in data["data"]:
+                  raise SystemExit(
+                      f"ERROR: Missing data.items: {filename}"
+                  )
+
+              items = data["data"]["items"]
+
+              actual = len(items)
+
+              if actual != expected:
+                  raise SystemExit(
+                      f"ERROR: {filename}: "
+                      f"{actual} records, expected {expected}"
+                  )
+
+              total += actual
+
+          if total != 36472:
+              raise SystemExit(
+                  f"ERROR: Total hadith records = {total}, "
+                  f"expected 36472"
+              )
+
+          # ==========================================
+          # Manifest
+          # ==========================================
+
+          manifest = root / "content-manifest-5.3.json"
+
+          if not manifest.is_file():
+              raise SystemExit(
+                  "ERROR: content-manifest-5.3.json is missing."
+              )
+
+          json.loads(
+              manifest.read_text(encoding="utf-8")
+          )
+
+          print("========================================")
+          print("OFFLINE CONTENT VALIDATION PASSED")
+          print("========================================")
+          print("Quran verses: 6236")
+          print("Hadith books: 9")
+          print("Hadith records: 36472")
+          print("All JSON files: VALID")
+          print("Manifest: VALID")
+          print("========================================")
+          PY
 
       - name: Build Debug APK
         working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          gradle clean assembleDebug --no-daemon --stacktrace
+          echo "Starting Android build..."
 
-      - name: Find APK
+          gradle clean assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+          echo "Android build completed."
+
+      - name: Verify generated APK
+        working-directory: ${{ steps.project.outputs.project }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          mkdir -p artifacts
-
-          APK=$(find "${{ steps.project.outputs.project }}/app/build/outputs/apk" \
-            -type f \
-            -name '*.apk' \
-            -print -quit)
-
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated."
-
-            if [ -d "${{ steps.project.outputs.project }}/app/build/outputs" ]; then
-              find "${{ steps.project.outputs.project }}/app/build/outputs" \
-                -type f \
-                -print
-            fi
-
-            exit 1
-          fi
-
-          cp "$APK" "artifacts/Maktab-Islami-5.3.apk"
-
-          echo "Generated APK:"
-          ls -lh "artifacts/Maktab-Islami-5.3.apk"
-
-      - name: Verify APK
-        shell: bash
-        run: |
-          set -e
-
-          APK="artifacts/Maktab-Islami-5.3.apk"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "ERROR: APK file missing."
+            echo "ERROR: APK was not generated."
+
+            echo "Available build outputs:"
+            find app/build/outputs \
+              -type f \
+              -print 2>/dev/null || true
+
             exit 1
           fi
 
-          echo "APK contents:"
-          unzip -l "$APK" | grep 'assets/' | head -100 || true
-
-          echo "APK size:"
+          echo "APK found:"
           ls -lh "$APK"
+
+          # ==========================================
+          # التأكد من وجود القرآن والكتب داخل APK
+          # ==========================================
+
+          REQUIRED_FILES=(
+            "assets/data/quran/i-muslim-quran-ar.json"
+            "assets/data/books/sahih-al-bukhari.json"
+            "assets/data/books/sahih-muslim.json"
+            "assets/data/books/sunan-abi-dawud.json"
+            "assets/data/books/jami-at-tirmidhi.json"
+            "assets/data/books/sunan-an-nasai.json"
+            "assets/data/books/sunan-ibn-majah.json"
+            "assets/data/books/muwatta-malik.json"
+            "assets/data/books/forty-nawawi.json"
+            "assets/data/books/forty-qudsi.json"
+          )
+
+          for FILE in "${REQUIRED_FILES[@]}"; do
+
+            if ! unzip -l "$APK" | grep -F "$FILE" >/dev/null; then
+              echo "ERROR: Missing from APK:"
+              echo "$FILE"
+              exit 1
+            fi
+
+            echo "OK: $FILE"
+
+          done
+
+          echo "========================================"
+          echo "APK CONTENT VALIDATION PASSED"
+          echo "========================================"
+
+      - name: Prepare APK artifact
+        working-directory: ${{ steps.project.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3.apk"
+
+          echo "Final APK:"
+          ls -lh \
+            "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
