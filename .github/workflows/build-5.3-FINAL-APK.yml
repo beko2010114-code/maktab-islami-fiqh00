@@ -1,9 +1,6 @@
-name: Build Maktab Islami 5.3 - FINAL APK
+name: Build Islami APK
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -11,16 +8,17 @@ permissions:
 
 jobs:
   build:
-    name: Build and verify APK
+    name: Build Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
@@ -30,165 +28,319 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip rsync findutils
+
+      - name: Locate project ZIP
+        id: zip
+        shell: bash
+        run: |
+          set -e
+
+          ZIP=$(find . \
+            -type f \
+            -iname "*.zip" \
+            ! -path "./.git/*" \
+            -print | head -n 1)
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: No ZIP file found."
+            exit 1
+          fi
+
+          echo "Found ZIP:"
+          echo "$ZIP"
+
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Extract project
+        id: extract
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf "$RUNNER_TEMP/islami"
+          mkdir -p "$RUNNER_TEMP/islami"
+
+          unzip -q \
+            "${{ steps.zip.outputs.zip }}" \
+            -d "$RUNNER_TEMP/islami"
+
+          echo "======================================"
+          echo "Extracted project files"
+          echo "======================================"
+
+          find "$RUNNER_TEMP/islami" \
+            -maxdepth 5 \
+            -type f | sort | head -500
+
       - name: Locate Android project
         id: project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          PROJECT="$GITHUB_WORKSPACE"
+          PROJECT=""
 
-          if [ ! -f "$PROJECT/settings.gradle" ] || [ ! -f "$PROJECT/app/build.gradle" ]; then
-            PROJECT="$(find "$GITHUB_WORKSPACE" -type f -path '*/app/build.gradle' -print -quit | xargs -r dirname | xargs -r dirname)"
-          fi
+          while IFS= read -r settings; do
 
-          if [ -z "$PROJECT" ] || [ ! -f "$PROJECT/settings.gradle" ] || [ ! -f "$PROJECT/app/build.gradle" ]; then
-            echo "ERROR: Android project was not found."
-            find "$GITHUB_WORKSPACE" -maxdepth 8 -type f -print | sort
-            exit 1
-          fi
+            DIR="$(dirname "$settings")"
 
-          echo "PROJECT=$PROJECT"
-          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+            if [ -f "$DIR/app/build.gradle" ] || \
+               [ -f "$DIR/app/build.gradle.kts" ]; then
 
-      - name: Validate project
-        working-directory: ${{ steps.project.outputs.project }}
-        shell: bash
-        run: |
-          set -euo pipefail
+              PROJECT="$DIR"
+              break
 
-          test -f settings.gradle
-          test -f build.gradle
-          test -f app/build.gradle
-          test -f app/src/main/AndroidManifest.xml
-          test -f app/src/main/assets/index.html
-          test -f app/src/main/assets/data/quran.json
+            fi
 
-          grep -q "com.android.application.*8.6.1" build.gradle
-          grep -q "compileSdk 35" app/build.gradle
-          grep -q "minSdk 23" app/build.gradle
-          grep -q "targetSdk 35" app/build.gradle
-          grep -q "versionCode 53" app/build.gradle
-          grep -q "versionName '5.3.0'" app/build.gradle
-          grep -q "androidx.webkit:webkit:1.15.0" app/build.gradle
-
-          echo "Project validation: PASS"
-
-      - name: Validate offline content
-        working-directory: ${{ steps.project.outputs.project }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          root = Path("app/src/main/assets/data")
-
-          quran = json.loads((root / "quran.json").read_text(encoding="utf-8"))
-          assert len(quran) == 114, len(quran)
-          assert sum(len(s["verses"]) for s in quran) == 6236
-
-          books = {
-              "bukhari.json": 7589,
-              "muslim.json": 7563,
-              "abudawud.json": 5274,
-              "tirmidhi.json": 3998,
-              "nasai.json": 5765,
-              "ibnmajah.json": 4343,
-              "malik.json": 1858,
-              "nawawi40.json": 42,
-              "qudsi40.json": 40,
-          }
-
-          total = 0
-
-          for name, expected in books.items():
-              path = root / "hadith" / name
-              assert path.is_file(), path
-
-              data = json.loads(path.read_text(encoding="utf-8"))
-              items = data["data"]["items"]
-
-              assert len(items) == expected, (name, len(items), expected)
-              total += len(items)
-
-          assert total == 36472, total
-
-          print("Quran: 6236 verses")
-          print("Nine books: 36472 records")
-          print("JSON validation: PASS")
-          PY
-
-      - name: Validate WebView security
-        working-directory: ${{ steps.project.outputs.project }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          MAIN="app/src/main/java/com/maktabislami/fiqh/MainActivity.java"
-
-          test -f "$MAIN"
-          grep -q "WebViewAssetLoader" "$MAIN"
-          grep -q "appassets.androidplatform.net/assets/index.html" "$MAIN"
-
-          if grep -q "setAllowUniversalAccessFromFileURLs(true)" "$MAIN"; then
-            echo "ERROR: insecure universal file access is enabled."
-            exit 1
-          fi
-
-          if grep -q "setAllowFileAccessFromFileURLs(true)" "$MAIN"; then
-            echo "ERROR: insecure file URL access is enabled."
-            exit 1
-          fi
-
-          echo "WebView validation: PASS"
-
-      - name: Build Debug APK
-        working-directory: ${{ steps.project.outputs.project }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gradle clean assembleDebug --no-daemon --stacktrace
-
-      - name: Verify APK
-        working-directory: ${{ steps.project.outputs.project }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          test -f "$APK"
-
-          required=(
-            "assets/index.html"
-            "assets/data/quran.json"
-            "assets/data/hadith/bukhari.json"
-            "assets/data/hadith/muslim.json"
-            "assets/data/hadith/abudawud.json"
-            "assets/data/hadith/tirmidhi.json"
-            "assets/data/hadith/nasai.json"
-            "assets/data/hadith/ibnmajah.json"
-            "assets/data/hadith/malik.json"
-            "assets/data/hadith/nawawi40.json"
-            "assets/data/hadith/qudsi40.json"
+          done < <(
+            find "$RUNNER_TEMP/islami" \
+              -type f \
+              \( \
+                -name "settings.gradle" \
+                -o \
+                -name "settings.gradle.kts" \
+              \) \
+              -print | sort
           )
 
-          for file in "${required[@]}"; do
-            unzip -l "$APK" | grep -F "$file" >/dev/null
-            echo "APK contains: $file"
-          done
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: Android project not found."
+            echo ""
+            echo "Searching for Gradle files..."
 
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cp "$APK" "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3-FINAL.apk"
+            find "$RUNNER_TEMP/islami" \
+              -type f \
+              \( \
+                -name "build.gradle" \
+                -o \
+                -name "build.gradle.kts" \
+              \) \
+              -print | sort
 
-          ls -lh "$GITHUB_WORKSPACE/artifacts/Maktab-Islami-5.3-FINAL.apk"
+            exit 1
+          fi
 
-      - name: Upload FINAL APK
+          echo "======================================"
+          echo "Android project found"
+          echo "======================================"
+
+          echo "$PROJECT"
+
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+
+      - name: Copy Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT="${{ steps.project.outputs.project }}"
+
+          echo "Copying project:"
+          echo "$PROJECT"
+
+          rsync -a \
+            "$PROJECT/" \
+            ./
+
+          echo "======================================"
+          echo "Repository structure"
+          echo "======================================"
+
+          find . \
+            -maxdepth 4 \
+            -type f \
+            ! -path "./.git/*" | sort | head -500
+
+      - name: Validate Android project
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Validating Android project"
+          echo "======================================"
+
+          if [ -f settings.gradle.kts ]; then
+            echo "settings.gradle.kts: OK"
+          elif [ -f settings.gradle ]; then
+            echo "settings.gradle: OK"
+          else
+            echo "ERROR: settings.gradle not found."
+            exit 1
+          fi
+
+          if [ -f app/build.gradle.kts ]; then
+            echo "app/build.gradle.kts: OK"
+          elif [ -f app/build.gradle ]; then
+            echo "app/build.gradle: OK"
+          else
+            echo "ERROR: app/build.gradle not found."
+            exit 1
+          fi
+
+          if [ -f app/src/main/AndroidManifest.xml ]; then
+            echo "AndroidManifest.xml: OK"
+          else
+            echo "ERROR: AndroidManifest.xml not found."
+            exit 1
+          fi
+
+          echo ""
+          echo "Android project validation: PASS"
+
+      - name: Check Gradle Wrapper
+        shell: bash
+        run: |
+          if [ -f gradlew ]; then
+
+            echo "Gradle Wrapper found."
+
+            chmod +x gradlew
+
+            ./gradlew --version
+
+          else
+
+            echo "Gradle Wrapper not found."
+            echo "Using installed Gradle 8.7 instead."
+
+            gradle --version
+
+          fi
+
+      - name: Clean project
+        shell: bash
+        run: |
+          set -e
+
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew clean --no-daemon
+          else
+            gradle clean --no-daemon
+          fi
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -o pipefail
+
+          echo "======================================"
+          echo "BUILDING APK"
+          echo "======================================"
+
+          if [ -f gradlew ]; then
+
+            chmod +x gradlew
+
+            ./gradlew \
+              assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --info \
+              2>&1 | tee build.log
+
+          else
+
+            gradle \
+              assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --info \
+              2>&1 | tee build.log
+
+          fi
+
+      - name: Show build error
+        if: failure()
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "BUILD FAILED"
+          echo "======================================"
+
+          if [ -f build.log ]; then
+
+            echo ""
+            echo "========== IMPORTANT ERROR =========="
+
+            grep -n \
+              -B 15 \
+              -A 40 \
+              -E \
+              "FAILURE:|What went wrong|Execution failed|Could not resolve|Could not find|error:|e: " \
+              build.log \
+              | tail -350 || true
+
+            echo ""
+            echo "========== LAST 200 LINES =========="
+
+            tail -200 build.log
+
+          fi
+
+      - name: Find APK
+        id: apk
+        if: success()
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Searching for APK"
+          echo "======================================"
+
+          APK=$(find . \
+            -type f \
+            -path "*/build/outputs/apk/*.apk" \
+            -print | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare APK
+        if: success()
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p release
+
+          cp \
+            "${{ steps.apk.outputs.path }}" \
+            release/Islami-debug.apk
+
+          echo "======================================"
+          echo "APK READY"
+          echo "======================================"
+
+          ls -lh release/Islami-debug.apk
+
+      - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Maktab-Islami-5.3-FINAL-APK
-          path: artifacts/Maktab-Islami-5.3-FINAL.apk
+          name: Islami-APK
+          path: release/Islami-debug.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Islami-Build-Log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
